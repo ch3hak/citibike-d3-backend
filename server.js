@@ -98,8 +98,83 @@ function startWebSocketServer() {
             message: 'Connected to Citi Bike real-time stream',
             timestamp: new Date().toISOString()
         }));
+
+        let isStreaming = false;
+        let interval = null;
+        let tripRows = [];
+        let tripIdx = 0;
+        let speed = 1;
+
+        ws.on('message', async (msg) => {
+            let parsed;
+            try { parsed = JSON.parse(msg); } catch { return; }
+            if (parsed.type === 'start_simulation') {
+                if (isStreaming) return;
+                isStreaming = true;
+                if (!tripRows.length) {
+                    const result = await pool.query('SELECT * FROM trips ORDER BY started_at LIMIT 10000');
+                    tripRows = result.rows;
+                    tripIdx = 0;
+                }
+                ws.send(JSON.stringify({ type: 'simulation_started', data: { totalTrips: tripRows.length } }));
+                interval = setInterval(() => {
+                    if (!isStreaming || tripIdx >= tripRows.length) return;
+                    const batch = [];
+                    for (let i = 0; i < Math.floor(Math.random()*3)+2 && tripIdx < tripRows.length; i++) {
+                        batch.push({ ...tripRows[tripIdx], trip_id: `live_${tripRows[tripIdx].trip_id}_${tripIdx}` });
+                        tripIdx++;
+                    }
+                    ws.send(JSON.stringify({
+                        type: "new_trips",
+                        data: batch,
+                        progress: {
+                            current: tripIdx,
+                            total: tripRows.length,
+                            percentage: Math.round((tripIdx / tripRows.length) * 100)
+                        }
+                    }));
+                }, 800/speed);
+            }
+            if (parsed.type === 'pause_simulation') {
+                isStreaming = false;
+                clearInterval(interval);
+                ws.send(JSON.stringify({ type: "simulation_paused" }));
+            }
+            if (parsed.type === 'stop_simulation' || parsed.type === 'reset_simulation') {
+                isStreaming = false;
+                clearInterval(interval);
+                tripIdx = 0;
+                ws.send(JSON.stringify({ type: "simulation_stopped" }));
+            }
+            if (parsed.type === 'set_speed' && typeof parsed.data?.speed === 'number') {
+                speed = parsed.data.speed;
+                clearInterval(interval);
+                if (isStreaming) {
+                    interval = setInterval(() => {
+                        if (!isStreaming || tripIdx >= tripRows.length) return;
+                        const batch = [];
+                        for (let i = 0; i < Math.floor(Math.random()*3)+2 && tripIdx < tripRows.length; i++) {
+                            batch.push({ ...tripRows[tripIdx], trip_id: `live_${tripRows[tripIdx].trip_id}_${tripIdx}` });
+                            tripIdx++;
+                        }
+                        ws.send(JSON.stringify({
+                            type: "new_trips",
+                            data: batch,
+                            progress: {
+                                current: tripIdx,
+                                total: tripRows.length,
+                                percentage: Math.round((tripIdx / tripRows.length) * 100)
+                            }
+                        }));
+                    }, 800/speed);
+                }
+                ws.send(JSON.stringify({ type: 'speed_changed', data: { speed } }));
+            }
+        });
         
         ws.on('close', () => {
+            isStreaming = false;
+            clearInterval(interval);
             console.log('WebSocket client disconnected');
         });
         
@@ -110,6 +185,7 @@ function startWebSocketServer() {
 
     app.locals.wss = wss;
 }
+
 
 process.on('SIGTERM', () => {
     console.log('SIGTERM received, shutting down gracefully');
